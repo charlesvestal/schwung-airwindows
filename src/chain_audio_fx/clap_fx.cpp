@@ -297,6 +297,9 @@ typedef struct {
     int plugins_scanned;            /* Flag: has the plugin list been scanned? */
     volatile int loading;           /* Flag: plugin is being loaded (skip processing) */
     uint64_t pending_load_time;     /* Time (ms) when we should actually load pending plugin */
+    unsigned request_seq;           /* Bumped (under loader_mutex) by every new selection: a
+                                       load that finishes after a newer request leaves that
+                                       request's selection and pending load in place */
     clap_host_list_t plugin_list;
     clap_fx_browser_index_t browser_index;
     clap_instance_t current_plugin;
@@ -310,6 +313,11 @@ typedef struct {
        realtime callback while dlopen + plugin->init + activate run. */
     pthread_t loader_thread;
     pthread_mutex_t loader_mutex;
+    /* Held while current_plugin is swapped (unload + load + param cache).
+       Loads block on it, so two can never overlap; the audio thread only
+       ever trylocks it and skips the block / param / query while a swap
+       runs, so it never touches a plugin that is being freed. */
+    pthread_mutex_t plugin_mutex;
     pthread_cond_t loader_cond;
     int loader_thread_started;
     volatile int loader_stop;
@@ -407,7 +415,10 @@ static void v2_apply_state_json(clap_fx_instance_t *inst, const char *json) {
     if (!inst || !json || !json[0]) return;
 
     /* State restore must win over any prior debounced browser selection. */
+    pthread_mutex_lock(&inst->loader_mutex);
+    inst->request_seq++;
     inst->pending_load_time = 0;
+    pthread_mutex_unlock(&inst->loader_mutex);
 
     /* Restore plugin selection first, so param indices map to the right plugin. */
     char plugin_id[256] = "";
@@ -433,12 +444,17 @@ static void v2_apply_state_json(clap_fx_instance_t *inst, const char *json) {
         inst->selected_plugin_id[sizeof(inst->selected_plugin_id) - 1] = '\0';
     }
 
-    if (!inst->current_plugin.plugin) return;
-
     const char *params_key = strstr(json, "\"params\"");
     if (!params_key) return;
     const char *arr = strchr(params_key, '[');
     if (!arr) return;
+
+    /* After any load above has finished (it releases the lock). */
+    pthread_mutex_lock(&inst->plugin_mutex);
+    if (!inst->current_plugin.plugin) {
+        pthread_mutex_unlock(&inst->plugin_mutex);
+        return;
+    }
 
     int param_count = clap_param_count(&inst->current_plugin);
     int idx = 0;
@@ -458,6 +474,7 @@ static void v2_apply_state_json(clap_fx_instance_t *inst, const char *json) {
             p++;
         }
     }
+    pthread_mutex_unlock(&inst->plugin_mutex);
 }
 
 /* Build state JSON object into caller buffer. */
@@ -577,6 +594,7 @@ static void *loader_thread_fn(void *arg) {
         }
         int idx = inst->selected_plugin_index;
         int loaded = inst->loaded_plugin_index;
+        unsigned seq = inst->request_seq;
         pthread_mutex_unlock(&inst->loader_mutex);
 
         int target_raw = v2_display_to_raw_index(inst, idx);
@@ -584,7 +602,7 @@ static void *loader_thread_fn(void *arg) {
             v2_load_plugin_by_display_index(inst, idx);
         } else {
             pthread_mutex_lock(&inst->loader_mutex);
-            inst->pending_load_time = 0;
+            if (inst->request_seq == seq) inst->pending_load_time = 0;
             pthread_mutex_unlock(&inst->loader_mutex);
         }
         pthread_mutex_lock(&inst->loader_mutex);
@@ -609,15 +627,18 @@ static int v2_load_plugin_by_raw_index(clap_fx_instance_t *inst, int index) {
         return -1;
     }
 
-    /* Mark as loading - audio thread will skip processing */
-    inst->loading = 1;
-    __sync_synchronize();
+    /* Serialize swaps. The loader worker, a state restore and a plugin_id
+       set could each load at once and free current_plugin under one
+       another (TEO segfaulted on fast undo/redo: jump_to_category loaded on
+       the audio thread while the worker loaded plugin_index's pick). The
+       audio thread's trylock fails while this is held, so it stays off the
+       plugin being freed. */
+    pthread_mutex_lock(&inst->loader_mutex);
+    unsigned seq = inst->request_seq;
+    pthread_mutex_unlock(&inst->loader_mutex);
 
-    /* Give the SPI realtime callback time to observe loading=1 before we
-       destroy the current plugin. Without this, when the loader worker
-       runs on a separate thread from process_block, we could free a
-       plugin still inside plugin->process(). One frame is ~3ms at 44.1k. */
-    usleep(5000);
+    pthread_mutex_lock(&inst->plugin_mutex);
+    inst->loading = 1;
 
     /* Unload current plugin if any */
     if (inst->current_plugin.plugin) {
@@ -631,29 +652,41 @@ static int v2_load_plugin_by_raw_index(clap_fx_instance_t *inst, int index) {
     if (clap_load_plugin(info->path, info->plugin_index, &inst->current_plugin) != 0) {
         v2_fx_log("Failed to load plugin");
         inst->loaded_plugin_index = -1;
-        inst->selected_plugin_index = -1;
-        inst->selected_category_index = -1;
         inst->selected_plugin_id[0] = '\0';
         inst->cached_param_count = 0;
-        inst->pending_load_time = 0;
+        pthread_mutex_lock(&inst->loader_mutex);
+        if (inst->request_seq == seq) {
+            inst->selected_plugin_index = -1;
+            inst->selected_category_index = -1;
+            inst->pending_load_time = 0;
+        }
+        pthread_mutex_unlock(&inst->loader_mutex);
         inst->loading = 0;
+        pthread_mutex_unlock(&inst->plugin_mutex);
         return -1;
     }
 
     /* Update loaded raw index and selected display index */
     inst->loaded_plugin_index = index;
-    inst->selected_plugin_index = inst->browser_index.raw_to_display[index];
-    inst->selected_category_index =
-        clap_fx_category_index_for_display(&inst->browser_index, inst->selected_plugin_index);
     strncpy(inst->selected_plugin_id, info->id, sizeof(inst->selected_plugin_id) - 1);
 
     /* Cache param names for this plugin */
     v2_cache_param_names(inst);
 
-    /* Clear pending load and mark as done */
-    inst->pending_load_time = 0;
-    __sync_synchronize();
+    /* The selection follows the load and the pending load is done, unless a
+       newer selection came in meanwhile (jump_to_category then plugin_index,
+       as a project restore sends them): that one stays pending, or this
+       load's end would cancel it and leave the category's first plugin. */
+    pthread_mutex_lock(&inst->loader_mutex);
+    if (inst->request_seq == seq) {
+        inst->selected_plugin_index = inst->browser_index.raw_to_display[index];
+        inst->selected_category_index =
+            clap_fx_category_index_for_display(&inst->browser_index, inst->selected_plugin_index);
+        inst->pending_load_time = 0;
+    }
+    pthread_mutex_unlock(&inst->loader_mutex);
     inst->loading = 0;
+    pthread_mutex_unlock(&inst->plugin_mutex);
     return 0;
 }
 
@@ -697,6 +730,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->selected_category_index = -1;
 
     pthread_mutex_init(&inst->loader_mutex, NULL);
+    pthread_mutex_init(&inst->plugin_mutex, NULL);
     pthread_cond_init(&inst->loader_cond, NULL);
     if (pthread_create(&inst->loader_thread, NULL, loader_thread_fn, inst) == 0) {
         inst->loader_thread_started = 1;
@@ -765,14 +799,19 @@ static void v2_destroy_instance(void *instance) {
     if (inst->current_plugin.plugin) {
         clap_unload_plugin(&inst->current_plugin);
     }
+    pthread_mutex_destroy(&inst->plugin_mutex);
     clap_free_plugin_list(&inst->plugin_list);
     free(inst);
 }
 
 static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     clap_fx_instance_t *inst = (clap_fx_instance_t*)instance;
-    if (!inst || !inst->current_plugin.plugin || inst->loading) {
-        return;  /* Pass through - no plugin or loading in progress */
+    if (!inst) return;
+    /* A swap in progress: pass through rather than wait (realtime). */
+    if (pthread_mutex_trylock(&inst->plugin_mutex) != 0) return;
+    if (!inst->current_plugin.plugin) {
+        pthread_mutex_unlock(&inst->plugin_mutex);
+        return;  /* Pass through - no plugin */
     }
 
     float float_in[MOVE_FRAMES_PER_BLOCK * 2];
@@ -782,7 +821,9 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         float_in[i] = audio_inout[i] / 32768.0f;
     }
 
-    if (clap_process_block(&inst->current_plugin, float_in, float_out, frames) != 0) {
+    int rc = clap_process_block(&inst->current_plugin, float_in, float_out, frames);
+    pthread_mutex_unlock(&inst->plugin_mutex);
+    if (rc != 0) {
         return;  /* Error - pass through */
     }
 
@@ -812,6 +853,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                The actual load runs on the loader worker thread so the SPI
                realtime callback never blocks on dlopen/plugin->init. */
             pthread_mutex_lock(&inst->loader_mutex);
+            inst->request_seq++;
             inst->selected_plugin_index = idx;
             inst->selected_category_index =
                 clap_fx_category_index_for_display(&inst->browser_index, idx);
@@ -824,9 +866,16 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         int category_index = atoi(val);
         int target_display = clap_fx_jump_display_index_for_category(&inst->browser_index, category_index);
         if (target_display >= 0) {
+            /* Loaded by the worker, as plugin_index is: a load here ran
+               dlopen + init on the caller's (realtime) thread, racing the
+               worker's own load of the same instance. */
+            pthread_mutex_lock(&inst->loader_mutex);
+            inst->request_seq++;
             inst->selected_plugin_index = target_display;
             inst->selected_category_index = category_index;
-            v2_load_plugin_by_display_index(inst, target_display);
+            inst->pending_load_time = get_time_ms();
+            pthread_cond_signal(&inst->loader_cond);
+            pthread_mutex_unlock(&inst->loader_mutex);
         }
     }
     else if (strcmp(key, "state") == 0) {
@@ -836,6 +885,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         /* param_0, param_1, etc. - direct index */
         int param_idx = atoi(key + 6);
         double value = atof(val);
+        /* Dropped while a plugin swap runs (its params are new anyway). */
+        if (pthread_mutex_trylock(&inst->plugin_mutex) != 0) return;
         if (inst->current_plugin.plugin) {
             clap_param_set(&inst->current_plugin, param_idx, value);
             /* NO LOGGING HERE. This runs at modulation rate — an LFO driving a
@@ -847,9 +898,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              * log traffic and audible dropouts. Logging a value that changes
              * every block is not useful anyway. */
         }
+        pthread_mutex_unlock(&inst->plugin_mutex);
     }
     else {
         /* Try to find param by sanitized name key */
+        if (pthread_mutex_trylock(&inst->plugin_mutex) != 0) return;
         int param_idx = v2_find_param_by_key(inst, key);
         if (param_idx >= 0 && inst->current_plugin.plugin) {
             double value = atof(val);
@@ -857,12 +910,24 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             /* Same hot path as the param_N branch above — see the note there.
              * No logging at modulation rate. */
         }
+        pthread_mutex_unlock(&inst->plugin_mutex);
     }
 }
 
+static int v2_get_param_locked(clap_fx_instance_t *inst, const char *key, char *buf, int buf_len);
+
+/* Queries read current_plugin and its cached params: only while no swap
+   runs (trylock — callers may be realtime); during one they fail (-1). */
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     clap_fx_instance_t *inst = (clap_fx_instance_t*)instance;
     if (!inst || !key || !buf || buf_len <= 0) return -1;
+    if (pthread_mutex_trylock(&inst->plugin_mutex) != 0) return -1;
+    int rc = v2_get_param_locked(inst, key, buf, buf_len);
+    pthread_mutex_unlock(&inst->plugin_mutex);
+    return rc;
+}
+
+static int v2_get_param_locked(clap_fx_instance_t *inst, const char *key, char *buf, int buf_len) {
 
     v2_ensure_plugins_scanned(inst);
 
