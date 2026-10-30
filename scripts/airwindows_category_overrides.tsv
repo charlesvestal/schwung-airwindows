@@ -24,17 +24,11 @@ ConsoleXChannel	Consoles
 ConsoleXPre	Consoles
 ConsoleX3	Consoles
 CStrip	Consoles
-Density3	Distortion
-Dynamics3	Dynamics
-kRockstar	Reverb
-LRConvolve3	Utility
 Pafnuty	Effects
-PearLiteEQ	Filter
 PunchyDeluxe	Distortion
 PunchyGuitar	Amp Sims
 PurestConsole4Buss	Consoles
 PurestConsole4Channel	Consoles
-PurestWarm3	Subtlety
-SoftClock3	Utility
 Spiral3	Saturation
 Weave	Saturation
+WoodenChest	Tone Color
