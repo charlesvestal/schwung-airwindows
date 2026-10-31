@@ -1,6 +1,6 @@
 # Airwindows for Schwung
 
-The full [Airwindows](https://github.com/airwindows/airwindows) collection — 519 audio effects by Chris Johnson — for your Ableton Move, via Schwung / Move Everything.
+The full [Airwindows](https://github.com/airwindows/airwindows) collection — 528 audio effects by Chris Johnson — for your Ableton Move, via Schwung / Move Everything.
 
 Drop it onto a Signal Chain, pick from 22 categories (consoles, tape, reverbs, saturation, and a whole lot of weird stuff), and dial it in with the encoders.
 
@@ -20,10 +20,10 @@ You'll need [Schwung / Move Everything](https://github.com/charlesvestal/move-ev
 
 ## The effects
 
-All 519, in the order they appear in the browser.
+All 528, in the order they appear in the browser.
 
 <details>
-<summary><strong>Ambience</strong> (25)</summary>
+<summary><strong>Ambience</strong> (26)</summary>
 
 - ADT
 - BrightAmbience
@@ -33,6 +33,7 @@ All 519, in the order they appear in the browser.
 - ChorusEnsemble
 - ClearCoat
 - Doublelay
+- Echojam
 - Ensemble
 - Hombre
 - kChamberAR
@@ -346,7 +347,7 @@ All 519, in the order they appear in the browser.
 </details>
 
 <details>
-<summary><strong>Filter</strong> (53)</summary>
+<summary><strong>Filter</strong> (54)</summary>
 
 - AngleEQ
 - AngleFilter
@@ -368,6 +369,7 @@ All 519, in the order they appear in the browser.
 - Distance3
 - Donut
 - EQ
+- FastDistance
 - FatEQ
 - Highpass
 - Highpass2
@@ -405,7 +407,7 @@ All 519, in the order they appear in the browser.
 </details>
 
 <details>
-<summary><strong>Lo-Fi</strong> (20)</summary>
+<summary><strong>Lo-Fi</strong> (21)</summary>
 
 - Bite
 - BitGlitter
@@ -418,6 +420,7 @@ All 519, in the order they appear in the browser.
 - DeRez2
 - DeRez3
 - DeRez4
+- DeRez5
 - DustBunny
 - Flutter
 - Flutter2
@@ -446,7 +449,7 @@ All 519, in the order they appear in the browser.
 </details>
 
 <details>
-<summary><strong>Reverb</strong> (38)</summary>
+<summary><strong>Reverb</strong> (42)</summary>
 
 - Chamber
 - Chamber2
@@ -475,14 +478,18 @@ All 519, in the order they appear in the browser.
 - kPlateC
 - kPlateD
 - kRockstar
+- kRockstar2
 - kStation
 - kWoodRoom
 - MatrixVerb
 - NonlinearSpace
 - PocketVerbs
 - Reverb
+- Ultralight
+- Ultralight2
 - Verbity
 - Verbity2
+- VerbSevens
 - VerbSixes
 - VerbThic
 - VerbTiny
@@ -578,7 +585,7 @@ All 519, in the order they appear in the browser.
 </details>
 
 <details>
-<summary><strong>Tone Color</strong> (16)</summary>
+<summary><strong>Tone Color</strong> (18)</summary>
 
 - Apicolypse
 - BussColors4
@@ -589,6 +596,7 @@ All 519, in the order they appear in the browser.
 - Channel7
 - Channel8
 - Channel9
+- ChannelX
 - Cider
 - Crystal
 - Elation
@@ -596,6 +604,7 @@ All 519, in the order they appear in the browser.
 - Neverland
 - Precious
 - WoodenBox
+- WoodenChest
 
 </details>
 
